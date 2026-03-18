@@ -1,0 +1,446 @@
+const statusEl = document.getElementById('status');
+const formEl = document.getElementById('query-form');
+const feedEl = document.getElementById('conversation-feed');
+const exportButtonEl = document.getElementById('export-button');
+const resetButtonEl = document.getElementById('reset-button');
+const questionButtons = document.querySelectorAll('.question-chip');
+const chatFormEl = document.getElementById('chat-form');
+const chatInputEl = document.getElementById('chat-input');
+
+let chatHistory = [];
+
+const selects = {
+  estado: document.getElementById('estado'),
+  cidade: document.getElementById('cidade'),
+  exibidor: document.getElementById('exibidor'),
+  tipo: document.getElementById('tipo'),
+  tipo_de_midia: document.getElementById('tipo-de-midia'),
+  vertical: document.getElementById('vertical'),
+  tipo_de_exposicao: document.getElementById('tipo-de-exposicao'),
+  groupBy: document.getElementById('group-by'),
+  metric: document.getElementById('metric'),
+  limit: document.getElementById('limit'),
+};
+
+let lastTable = null;
+
+function fillSelect(select, values, placeholder) {
+  select.innerHTML = '';
+  const first = document.createElement('option');
+  first.value = '';
+  first.textContent = placeholder;
+  select.appendChild(first);
+
+  for (const item of values) {
+    const option = document.createElement('option');
+    option.value = item.value;
+    option.textContent = `${item.value} (${item.count})`;
+    select.appendChild(option);
+  }
+}
+
+function formatValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value.toLocaleString('pt-BR');
+  }
+  return value ?? '';
+}
+
+function createMessage(role, _title, content) {
+  const article = document.createElement('article');
+  article.className = `message ${role}`;
+
+  const avatar = document.createElement('div');
+  avatar.className = 'message-avatar';
+  avatar.textContent = role === 'user' ? 'Y' : 'M';
+  article.appendChild(avatar);
+
+  const messageContent = document.createElement('div');
+  messageContent.className = 'message-content';
+
+  const body = document.createElement('div');
+  body.className = 'message-body';
+  body.textContent = content;
+  messageContent.appendChild(body);
+
+  article.appendChild(messageContent);
+  return article;
+}
+
+function createSummaryBlock(result, queryParams) {
+  const block = document.createElement('div');
+  block.className = 'result-block';
+
+  const cards = document.createElement('div');
+  cards.className = 'summary-grid';
+
+  const items = [
+    { label: 'Registros filtrados', value: result.presentation.summary.matchedRows },
+    { label: 'Modo', value: result.presentation.summary.mode === 'grouped' ? 'Agrupado' : 'Linhas' },
+    { label: 'Métrica', value: result.presentation.summary.metric },
+  ];
+
+  if (result.presentation.summary.aggregate !== null && result.presentation.summary.aggregate !== undefined) {
+    items.push({ label: 'Agregado', value: result.presentation.summary.aggregate });
+  }
+
+  for (const item of items) {
+    const card = document.createElement('div');
+    card.className = 'summary-card';
+    card.innerHTML = `<p>${item.label}</p><strong>${formatValue(item.value)}</strong>`;
+    cards.appendChild(card);
+  }
+  block.appendChild(cards);
+
+  const filters = result.presentation.summary.filters || [];
+  if (filters.length) {
+    const filterLine = document.createElement('div');
+    filterLine.className = 'filters-line';
+    filterLine.textContent = filters.map((f) => `${f.label} = ${Array.isArray(f.value) ? f.value.join(', ') : f.value}`).join(' | ');
+    block.appendChild(filterLine);
+  }
+
+  const totalRows = result.presentation.summary.matchedRows || 0;
+  if (totalRows > 0 && queryParams) {
+    const downloadBtn = document.createElement('button');
+    downloadBtn.className = 'download-data-btn';
+    downloadBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Baixar XLSX (${totalRows.toLocaleString('pt-BR')} registros)`;
+    downloadBtn.addEventListener('click', () => exportXlsx(queryParams, downloadBtn));
+    block.appendChild(downloadBtn);
+  }
+
+  return block;
+}
+
+function buildPromptText(meta = {}) {
+  if (meta.prompt) {
+    return meta.prompt;
+  }
+
+  const parts = [];
+  const filters = [
+    ['estado', 'estado'],
+    ['cidade', 'cidade'],
+    ['exibidor', 'exibidor'],
+    ['tipo', 'tipo'],
+    ['tipo_de_midia', 'tipo de mídia'],
+    ['vertical', 'vertical'],
+    ['tipo_de_exposicao', 'exposição'],
+  ];
+
+  for (const [key, label] of filters) {
+    if (selects[key].value) {
+      parts.push(`${label}: ${selects[key].value}`);
+    }
+  }
+
+  const groupBy = selects.groupBy.value ? `agrupado por ${selects.groupBy.options[selects.groupBy.selectedIndex].text}` : 'sem agrupamento';
+  const metric = selects.metric.options[selects.metric.selectedIndex].text;
+
+  return parts.length
+    ? `Analise ${parts.join(', ')} com ${metric.toLowerCase()} e ${groupBy}.`
+    : `Mostre uma visão geral da base com ${metric.toLowerCase()} e ${groupBy}.`;
+}
+
+function buildResultText(result) {
+  const matched = result.presentation.summary.matchedRows;
+  const grouped = result.presentation.summary.mode === 'grouped';
+  const aggregate = result.presentation.summary.aggregate;
+
+  if (grouped) {
+    return `Encontrei ${formatValue(matched)} registros e organizei a resposta em ranking.`;
+  }
+
+  if (aggregate !== null && aggregate !== undefined) {
+    return `Encontrei ${formatValue(matched)} registros. O agregado pedido retorna ${formatValue(aggregate)}.`;
+  }
+
+  return `Encontrei ${formatValue(matched)} registros com esse contexto.`;
+}
+
+function buildQueryPayload() {
+  const filters = [];
+  const map = [
+    ['estado', 'estado'],
+    ['cidade', 'cidade'],
+    ['exibidor', 'exibidor'],
+    ['tipo', 'tipo'],
+    ['tipo_de_midia', 'tipo_de_midia'],
+    ['vertical', 'vertical'],
+    ['tipo_de_exposicao', 'tipo_de_exposicao'],
+  ];
+
+  for (const [id, column] of map) {
+    const value = selects[id].value;
+    if (value) {
+      filters.push({ column, operator: 'eq', value });
+    }
+  }
+
+  return {
+    filters,
+    groupBy: selects.groupBy.value ? [selects.groupBy.value] : [],
+    metric: selects.metric.value,
+    metricColumn: 'fluxo_de_passantes',
+    limit: Number(selects.limit.value),
+    sort: { by: 'value', direction: 'desc' },
+  };
+}
+
+function createTypingIndicator() {
+  const article = document.createElement('article');
+  article.className = 'message assistant';
+  article.id = 'typing-indicator';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'message-avatar';
+  avatar.textContent = 'M';
+  article.appendChild(avatar);
+
+  const messageContent = document.createElement('div');
+  messageContent.className = 'message-content';
+
+  const body = document.createElement('div');
+  body.className = 'message-body typing-dots';
+  body.textContent = 'Pensando...';
+  messageContent.appendChild(body);
+
+  article.appendChild(messageContent);
+  return article;
+}
+
+async function sendChat(text) {
+  chatHistory.push({ role: 'user', content: text });
+
+  const userMessage = createMessage('user', 'Você', text);
+  feedEl.appendChild(userMessage);
+
+  const typing = createTypingIndicator();
+  feedEl.appendChild(typing);
+  feedEl.scrollTop = feedEl.scrollHeight;
+  chatInputEl.disabled = true;
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: chatHistory }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Falha no chat.');
+
+    typing.remove();
+    chatHistory.push({ role: 'assistant', content: data.answer });
+
+    const assistantMessage = createMessage('assistant', 'Assistente IA', data.answer);
+    if (data.result && data.lastQuery) {
+      lastTable = data.result.table;
+      exportButtonEl.disabled = false;
+      assistantMessage.querySelector('.message-content').appendChild(createSummaryBlock({ presentation: data.result }, data.lastQuery));
+    }
+    feedEl.appendChild(assistantMessage);
+    feedEl.scrollTop = feedEl.scrollHeight;
+  } catch (error) {
+    typing.remove();
+    chatHistory.pop();
+    const errMessage = createMessage('assistant', 'Erro', error.message);
+    feedEl.appendChild(errMessage);
+    feedEl.scrollTop = feedEl.scrollHeight;
+  } finally {
+    chatInputEl.disabled = false;
+    chatInputEl.focus();
+  }
+}
+
+async function runQuery(meta = {}) {
+  const payload = buildQueryPayload();
+  const userMessage = createMessage('user', 'Você perguntou', buildPromptText(meta));
+  feedEl.appendChild(userMessage);
+
+  const response = await fetch('/api/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || 'Falha ao consultar a base.');
+  }
+
+  lastTable = data.presentation.table;
+  exportButtonEl.disabled = false;
+
+  const assistantMessage = createMessage('assistant', 'Assistente local', buildResultText(data));
+  assistantMessage.querySelector('.message-content').appendChild(createSummaryBlock(data, buildQueryPayload()));
+  feedEl.appendChild(assistantMessage);
+  feedEl.scrollTop = feedEl.scrollHeight;
+}
+
+async function exportXlsx(queryParams, btn) {
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = 'Gerando arquivo...';
+  try {
+    const response = await fetch('/api/export-xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: queryParams }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || 'Falha ao exportar.');
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'resultado-clone-mia.xlsx';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
+}
+
+async function exportCsv() {
+  if (!lastTable) {
+    return;
+  }
+
+  const response = await fetch('/api/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ table: lastTable }),
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || 'Falha ao exportar CSV.');
+  }
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'resultado-base-spotifinder.csv';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function resetFilters() {
+  Object.values(selects).forEach((select) => {
+    select.value = '';
+  });
+  selects.metric.value = 'count';
+  selects.limit.value = '20';
+}
+
+function applyPreset(name) {
+  resetFilters();
+  let prompt = '';
+
+  if (name === 'top-estados') {
+    selects.groupBy.value = 'estado';
+    prompt = 'Onde o inventário total está mais concentrado no Brasil?';
+  } else if (name === 'top-cidades-rj') {
+    selects.estado.value = 'RJ';
+    selects.groupBy.value = 'cidade';
+    prompt = 'Como o inventário do estado do Rio de Janeiro se distribui por cidade?';
+  } else if (name === 'digitais-sp') {
+    selects.estado.value = 'SP';
+    selects.tipo.value = 'DIGITAL';
+    selects.groupBy.value = 'exibidor';
+    prompt = 'Quem domina o inventário digital em São Paulo?';
+  } else if (name === 'outdoors-rio') {
+    selects.cidade.value = 'RIO DE JANEIRO';
+    selects.tipo_de_midia.value = 'OUTDOOR';
+    selects.groupBy.value = 'exibidor';
+    prompt = 'Quais exibidores lideram outdoor na cidade do Rio de Janeiro?';
+  } else if (name === 'verticais-df') {
+    selects.estado.value = 'DF';
+    selects.groupBy.value = 'vertical';
+    prompt = 'Que verticais concentram mais inventário no Distrito Federal?';
+  } else if (name === 'aeroportos-br') {
+    selects.tipo_de_midia.value = 'AEROPORTO';
+    selects.groupBy.value = 'estado';
+    prompt = 'Em quais estados a mídia de aeroporto aparece com mais força?';
+  }
+
+  runQuery({ prompt }).catch((error) => alert(error.message));
+}
+
+async function loadOptions() {
+  const [healthResponse, optionsResponse] = await Promise.all([fetch('/api/health'), fetch('/api/options')]);
+  const health = await healthResponse.json();
+  const options = await optionsResponse.json();
+
+  statusEl.textContent = `${health.records.toLocaleString('pt-BR')} registros prontos para conversa local`;
+  fillSelect(selects.estado, options.estados, 'Todos os estados');
+  fillSelect(selects.cidade, options.cidades, 'Todas as cidades');
+  fillSelect(selects.exibidor, options.exibidores, 'Todos os exibidores');
+  fillSelect(selects.tipo, options.tipos, 'Todos os tipos');
+  fillSelect(selects.tipo_de_midia, options.tiposMidia, 'Todos os tipos de mídia');
+  fillSelect(selects.vertical, options.verticais, 'Todas as verticais');
+  fillSelect(selects.tipo_de_exposicao, options.exposicoes, 'Todas as exposições');
+}
+
+formEl.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    await runQuery();
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+resetButtonEl.addEventListener('click', () => {
+  resetFilters();
+});
+
+exportButtonEl.addEventListener('click', async () => {
+  try {
+    await exportCsv();
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+for (const button of questionButtons) {
+  button.addEventListener('click', () => applyPreset(button.dataset.preset));
+}
+
+document.getElementById('sidebar-toggle').addEventListener('click', () => {
+  document.querySelector('.app-shell').classList.toggle('sidebar-collapsed');
+});
+
+document.getElementById('new-chat-button').addEventListener('click', () => {
+  chatHistory = [];
+  lastTable = null;
+  exportButtonEl.disabled = true;
+  feedEl.innerHTML = '';
+  const intro = document.createElement('div');
+  intro.className = 'intro-block';
+  intro.innerHTML = '<div class="intro-avatar">M</div><p class="intro-text">Olá! Sou o Clone MIA. Faça uma pergunta sobre a base de inventário ou escolha uma sugestão abaixo.</p>';
+  feedEl.appendChild(intro);
+});
+
+chatFormEl.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const text = chatInputEl.value.trim();
+  if (!text) return;
+  chatInputEl.value = '';
+  await sendChat(text);
+});
+
+loadOptions().catch(() => {
+  statusEl.textContent = 'Nao foi possivel carregar a base local.';
+});
