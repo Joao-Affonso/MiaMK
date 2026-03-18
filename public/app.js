@@ -24,6 +24,41 @@ const selects = {
 
 let lastTable = null;
 
+const CASCADE_ORDER = ['estado', 'cidade', 'exibidor', 'tipo', 'tipo_de_midia', 'vertical', 'tipo_de_exposicao'];
+const PLACEHOLDERS = {
+  estado: 'Todos os estados',
+  cidade: 'Todas as cidades',
+  exibidor: 'Todos os exibidores',
+  tipo: 'Todos os tipos',
+  tipo_de_midia: 'Todos os tipos de mídia',
+  vertical: 'Todas as verticais',
+  tipo_de_exposicao: 'Todas as exposições',
+};
+
+async function refreshDownstream(changedKey) {
+  const changedIndex = CASCADE_ORDER.indexOf(changedKey);
+  const downstream = CASCADE_ORDER.slice(changedIndex + 1);
+  const filters = CASCADE_ORDER.slice(0, changedIndex + 1)
+    .filter((key) => selects[key].value)
+    .map((key) => ({ column: key, operator: 'eq', value: selects[key].value }));
+
+  await Promise.all(downstream.map(async (key) => {
+    try {
+      const response = await fetch('/api/filtered-options', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ column: key, filters }),
+      });
+      const data = await response.json();
+      const currentVal = selects[key].value;
+      fillSelect(selects[key], data.values, PLACEHOLDERS[key]);
+      if (data.values.some((v) => v.value === currentVal)) {
+        selects[key].value = currentVal;
+      }
+    } catch (_) {}
+  }));
+}
+
 function fillSelect(select, values, placeholder) {
   select.innerHTML = '';
   const first = document.createElement('option');
@@ -100,13 +135,59 @@ function createSummaryBlock(result, queryParams) {
     block.appendChild(filterLine);
   }
 
+  const table = result.presentation.table;
+  if (table?.columns?.length && table?.rows?.length) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'result-table-wrapper';
+
+    const tbl = document.createElement('table');
+    tbl.className = 'result-table';
+
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    for (const col of table.columns) {
+      const th = document.createElement('th');
+      th.textContent = col.label || col.key;
+      headerRow.appendChild(th);
+    }
+    thead.appendChild(headerRow);
+    tbl.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    for (const row of table.rows) {
+      const tr = document.createElement('tr');
+      for (const col of table.columns) {
+        const td = document.createElement('td');
+        td.textContent = formatValue(row[col.key]);
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    tbl.appendChild(tbody);
+    wrapper.appendChild(tbl);
+    block.appendChild(wrapper);
+  }
+
   const totalRows = result.presentation.summary.matchedRows || 0;
   if (totalRows > 0 && queryParams) {
-    const downloadBtn = document.createElement('button');
-    downloadBtn.className = 'download-data-btn';
-    downloadBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Baixar XLSX (${totalRows.toLocaleString('pt-BR')} registros)`;
-    downloadBtn.addEventListener('click', () => exportXlsx(queryParams, downloadBtn));
-    block.appendChild(downloadBtn);
+    const exportRow = document.createElement('div');
+    exportRow.className = 'export-row';
+
+    if (table?.columns?.length && table?.rows?.length) {
+      const tableBtn = document.createElement('button');
+      tableBtn.className = 'download-data-btn';
+      tableBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Exportar tabela (${table.rows.length.toLocaleString('pt-BR')} linhas)`;
+      tableBtn.addEventListener('click', () => exportTableXlsx(table, tableBtn));
+      exportRow.appendChild(tableBtn);
+    }
+
+    const rawBtn = document.createElement('button');
+    rawBtn.className = 'download-data-btn';
+    rawBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Exportar registros completos (${totalRows.toLocaleString('pt-BR')} linhas)`;
+    rawBtn.addEventListener('click', () => exportXlsx(queryParams, rawBtn));
+    exportRow.appendChild(rawBtn);
+
+    block.appendChild(exportRow);
   }
 
   return block;
@@ -187,6 +268,71 @@ function buildQueryPayload() {
   };
 }
 
+function buildDynamicSuggestions(lastQuery) {
+  if (!lastQuery) return [];
+
+  const suggestions = [];
+  const filters = lastQuery.filters || [];
+  const groupBy = lastQuery.groupBy || [];
+
+  const cidadeFilter = filters.find((f) => f.column === 'cidade');
+  const estadoFilter = filters.find((f) => f.column === 'estado');
+  const exibidorFilter = filters.find((f) => f.column === 'exibidor');
+  const tipoMidiaFilter = filters.find((f) => f.column === 'tipo_de_midia');
+
+  const groupedByCidade = groupBy.includes('cidade');
+  const groupedByEstado = groupBy.includes('estado');
+  const groupedByExibidor = groupBy.includes('exibidor');
+
+  if (cidadeFilter) {
+    const cidade = cidadeFilter.value;
+    if (!groupedByExibidor) suggestions.push(`Quais exibidores atuam em ${cidade}?`);
+    if (!tipoMidiaFilter) suggestions.push(`Que tipos de mídia existem em ${cidade}?`);
+    suggestions.push(`Como ${cidade} se compara com outras cidades?`);
+  } else if (estadoFilter) {
+    const estado = estadoFilter.value;
+    if (!groupedByCidade) suggestions.push(`Quais cidades têm mais pontos em ${estado}?`);
+    if (!groupedByExibidor) suggestions.push(`Quem domina o inventário em ${estado}?`);
+    suggestions.push(`Que tipos de mídia predominam em ${estado}?`);
+  } else if (groupedByCidade) {
+    suggestions.push('Quais exibidores lideram em São Paulo?');
+    suggestions.push('Como está a distribuição por tipo de mídia?');
+    suggestions.push('Qual cidade tem mais mídia digital?');
+  } else if (groupedByEstado) {
+    suggestions.push('Detalhar as cidades do estado líder?');
+    suggestions.push('Quem são os maiores exibidores do Brasil?');
+    suggestions.push('Qual a distribuição por tipo de exposição?');
+  } else if (groupedByExibidor) {
+    if (!exibidorFilter) suggestions.push('Qual exibidor tem mais pontos digitais?');
+    suggestions.push('Como os exibidores se distribuem por estado?');
+    suggestions.push('Qual a média de fluxo por exibidor?');
+  } else {
+    suggestions.push('Quais são as 10 cidades com mais pontos?');
+    suggestions.push('Quem são os maiores exibidores?');
+    suggestions.push('Como está a distribuição por tipo de mídia?');
+  }
+
+  return suggestions.slice(0, 3);
+}
+
+function updateSuggestions(lastQuery) {
+  const suggestionsEl = document.getElementById('suggestions');
+  const dynamic = buildDynamicSuggestions(lastQuery);
+  if (!dynamic.length) return;
+
+  suggestionsEl.innerHTML = '';
+  for (const text of dynamic) {
+    const btn = document.createElement('button');
+    btn.className = 'question-chip';
+    btn.textContent = text;
+    btn.addEventListener('click', async () => {
+      chatInputEl.value = '';
+      await sendChat(text);
+    });
+    suggestionsEl.appendChild(btn);
+  }
+}
+
 function createTypingIndicator() {
   const article = document.createElement('article');
   article.className = 'message assistant';
@@ -238,6 +384,7 @@ async function sendChat(text) {
       lastTable = data.result.table;
       exportButtonEl.disabled = false;
       assistantMessage.querySelector('.message-content').appendChild(createSummaryBlock({ presentation: data.result }, data.lastQuery));
+      updateSuggestions(data.lastQuery);
     }
     feedEl.appendChild(assistantMessage);
     feedEl.scrollTop = feedEl.scrollHeight;
@@ -276,6 +423,38 @@ async function runQuery(meta = {}) {
   assistantMessage.querySelector('.message-content').appendChild(createSummaryBlock(data, buildQueryPayload()));
   feedEl.appendChild(assistantMessage);
   feedEl.scrollTop = feedEl.scrollHeight;
+  updateSuggestions(data.query);
+}
+
+async function exportTableXlsx(table, btn) {
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = 'Gerando arquivo...';
+  try {
+    const response = await fetch('/api/export-table-xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ table }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || 'Falha ao exportar.');
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'tabela-clone-mia.xlsx';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
 }
 
 async function exportXlsx(queryParams, btn) {
@@ -439,6 +618,15 @@ chatFormEl.addEventListener('submit', async (event) => {
   if (!text) return;
   chatInputEl.value = '';
   await sendChat(text);
+});
+
+for (const key of CASCADE_ORDER) {
+  selects[key].addEventListener('change', () => refreshDownstream(key));
+}
+
+document.getElementById('extract-button').addEventListener('click', async () => {
+  const btn = document.getElementById('extract-button');
+  await exportXlsx(buildQueryPayload(), btn);
 });
 
 loadOptions().catch(() => {

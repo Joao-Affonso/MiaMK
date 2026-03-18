@@ -24,16 +24,20 @@ function createChatService({ datasetService }) {
   function buildMessages(messages, toolContext) {
     const systemMessage = [
       'Voce e a MIA, analista especialista em midia OOH (out-of-home) do Brasil, com acesso ao inventario Spotifinder.',
-      'Responda sempre em portugues do Brasil com personalidade: direta, perspicaz, como um bom analista de mercado.',
+      'REGRA ABSOLUTA: responda SEMPRE e SOMENTE em portugues do Brasil. Nunca use outro idioma, nem parcialmente.',
+      'Personalidade: direta, perspicaz, como um bom analista de mercado.',
       'CONCEITO FUNDAMENTAL: cada linha da base e um PONTO DE MIDIA (uma tela, outdoor ou painel fisico). Um EXIBIDOR e uma empresa que opera varios pontos. Nunca confunda pontos com exibidores.',
       'Ao responder, sempre use "pontos de midia" ou "ativos" para se referir a registros — nunca "exibidores" no lugar de contagem.',
       'SEMPRE chame uma ferramenta antes de responder. Nunca invente numeros.',
       'Para perguntas como "quantas cidades", "quantos exibidores distintos", "em quantos estados": use count_distinct.',
       'Para rankings, distribuicoes ou valores agregados: use query_base com groupBy e limit adequado.',
+      'IMPORTANTE: para perguntas como "quais exibidores atuam", "que tipos existem", "quem opera em X" — SEMPRE use groupBy para obter valores distintos. Nunca use select sem groupBy para esse tipo de pergunta.',
       'Filtros sao case-insensitive: use o valor como o usuario digitou.',
-      'Para rankings de exibidores em uma cidade: groupBy=["exibidor"], sort desc, limit 10.',
+      'Para rankings de exibidores em uma cidade: groupBy=["exibidor"], filters por cidade, limit 20.',
       'Interprete os dados: destaque o que e surpreendente, relevante ou estrategico. Responda em 3 a 5 frases naturais.',
       `Colunas: ${toolContext.columns.map((c) => c.key).join(', ')}. Base: ${toolContext.totalRows} pontos de midia.`,
+      `Exibidores conhecidos (empresas operadoras): ${toolContext.quickStats.topExibidores.map((e) => e.value).join(', ')}, entre outros. Qualquer nome que apareca na conversa como exibidor deve ser filtrado com column="exibidor", nao com tipo_de_midia.`,
+      'IMPORTANTE: quando o usuario mencionar um nome que apareceu na resposta anterior (exibidor, cidade, tipo), interprete pelo contexto — nao trate nomes de empresas como tipos de midia.',
     ].join(' ');
 
     return [
@@ -74,7 +78,7 @@ function createChatService({ datasetService }) {
                   type: 'object',
                   properties: {
                     column: { type: 'string' },
-                    operator: { type: 'string' },
+                    operator: { type: 'string', enum: ['eq', 'not_eq', 'contains', 'starts_with', 'in', 'gt', 'gte', 'lt', 'lte', 'between', 'is_empty', 'is_not_empty'] },
                     value: { oneOf: [{ type: 'string' }, { type: 'number' }, { type: 'array', items: { oneOf: [{ type: 'string' }, { type: 'number' }] } }] },
                   },
                   required: ['column', 'operator'],
@@ -99,7 +103,7 @@ function createChatService({ datasetService }) {
                   type: 'object',
                   properties: {
                     column: { type: 'string' },
-                    operator: { type: 'string' },
+                    operator: { type: 'string', enum: ['eq', 'not_eq', 'contains', 'starts_with', 'in', 'gt', 'gte', 'lt', 'lte', 'between', 'is_empty', 'is_not_empty'] },
                     value: {
                       oneOf: [
                         { type: 'string' },

@@ -45,6 +45,19 @@ app.get('/api/options', (_req, res) => {
   }
 });
 
+app.post('/api/filtered-options', (req, res) => {
+  try {
+    const { column, filters = [] } = req.body;
+    const result = datasetService.query({ filters, groupBy: [column], limit: 2000, _bypassLimit: true });
+    const values = result.groups
+      .map((g) => ({ value: g.group[column], count: g.rowCount }))
+      .filter((v) => v.value && v.value !== '(vazio)');
+    res.json({ values });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post('/api/query', (req, res) => {
   try {
     const result = datasetService.query(req.body || {});
@@ -106,6 +119,39 @@ app.post('/api/export-xlsx', (req, res) => {
   } catch (error) {
     console.error('[export-xlsx error]', error);
     return res.status(500).json({ error: 'Falha ao exportar o resultado.' });
+  }
+});
+
+app.post('/api/export-table-xlsx', (req, res) => {
+  try {
+    const table = req.body?.table;
+    if (!table || !Array.isArray(table.columns) || !Array.isArray(table.rows)) {
+      return res.status(400).json({ error: 'Tabela inválida para exportação.' });
+    }
+
+    const header = table.columns.map((column) => String(column.label ?? column.key));
+    const matrix = [header];
+
+    for (const row of table.rows) {
+      matrix.push(
+        table.columns.map((column) => {
+          const value = row?.[column.key];
+          return value === null || value === undefined ? '' : value;
+        }),
+      );
+    }
+
+    const worksheet = XLSX.utils.aoa_to_sheet(matrix);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Tabela');
+    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="tabela-clone-mia.xlsx"');
+    return res.send(buffer);
+  } catch (error) {
+    console.error('[export-table-xlsx error]', error);
+    return res.status(500).json({ error: 'Falha ao exportar a tabela.' });
   }
 });
 

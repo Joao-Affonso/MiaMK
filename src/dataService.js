@@ -99,7 +99,8 @@ function compareValues(a, b, direction) {
 }
 
 function applyFilter(row, filter) {
-  const operator = filter.operator || 'eq';
+  const operatorRaw = filter.operator || 'eq';
+  const operator = operatorRaw === '=' ? 'eq' : operatorRaw === '!=' ? 'not_eq' : operatorRaw;
   const column = filter.column;
   const currentValue = row[column];
 
@@ -264,8 +265,13 @@ function createDatasetService({ workbookPath }) {
           key: column,
           label: labelByKey[column] || column,
         })),
-        { key: 'rowCount', label: 'Registros' },
-        { key: 'value', label: result.metric === 'count' ? 'Valor' : `${result.metric} (${labelByKey[result.metricColumn] || result.metricColumn})` },
+        ...(result.metric === 'count'
+          ? [{ key: 'value', label: 'Pontos de mídia' }]
+          : [
+              { key: 'rowCount', label: 'Registros' },
+              { key: 'value', label: `${result.metric} (${labelByKey[result.metricColumn] || result.metricColumn})` },
+            ]
+        ),
       ];
 
       const rowsForTable = result.groups.map((item) => {
