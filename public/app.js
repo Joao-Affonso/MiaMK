@@ -333,6 +333,34 @@ function updateSuggestions(lastQuery) {
   }
 }
 
+function createClarificationBlock(clarification) {
+  const block = document.createElement('div');
+  block.className = 'clarification-block';
+
+  const question = document.createElement('p');
+  question.className = 'clarification-question';
+  question.textContent = clarification.question;
+  block.appendChild(question);
+
+  const buttons = document.createElement('div');
+  buttons.className = 'clarification-options';
+
+  for (const option of clarification.options) {
+    const btn = document.createElement('button');
+    btn.className = 'clarification-btn';
+    btn.textContent = option.label;
+    btn.addEventListener('click', () => {
+      block.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+      btn.classList.add('clarification-btn--chosen');
+      sendChat(option.label);
+    });
+    buttons.appendChild(btn);
+  }
+
+  block.appendChild(buttons);
+  return block;
+}
+
 function createTypingIndicator() {
   const article = document.createElement('article');
   article.className = 'message assistant';
@@ -385,6 +413,9 @@ async function sendChat(text) {
       exportButtonEl.disabled = false;
       assistantMessage.querySelector('.message-content').appendChild(createSummaryBlock({ presentation: data.result }, data.lastQuery));
       updateSuggestions(data.lastQuery);
+    }
+    if (data.clarification) {
+      assistantMessage.querySelector('.message-content').appendChild(createClarificationBlock(data.clarification));
     }
     feedEl.appendChild(assistantMessage);
     feedEl.scrollTop = feedEl.scrollHeight;
@@ -583,6 +614,7 @@ formEl.addEventListener('submit', async (event) => {
 
 resetButtonEl.addEventListener('click', () => {
   resetFilters();
+  updateQuickAnalysis();
 });
 
 exportButtonEl.addEventListener('click', async () => {
@@ -620,8 +652,62 @@ chatFormEl.addEventListener('submit', async (event) => {
   await sendChat(text);
 });
 
+const QUICK_ANALYSIS_OPTIONS = [
+  { key: 'exibidor',        label: 'Por Exibidor' },
+  { key: 'cidade',          label: 'Por Praça' },
+  { key: 'tipo_de_midia',   label: 'Por Tipo de Mídia' },
+  { key: 'tipo',            label: 'Por Formato' },
+  { key: 'vertical',        label: 'Por Vertical' },
+  { key: 'tipo_de_exposicao', label: 'Por Exposição' },
+  { key: 'estado',          label: 'Por Estado' },
+];
+
+function updateQuickAnalysis() {
+  const qaEl = document.getElementById('quick-analysis');
+  const ctxEl = document.getElementById('quick-analysis-context');
+  const chipsEl = document.getElementById('quick-analysis-chips');
+
+  const activeFilters = CASCADE_ORDER
+    .filter((key) => selects[key]?.value)
+    .map((key) => selects[key].value);
+
+  if (!activeFilters.length) {
+    qaEl.classList.add('hidden');
+    return;
+  }
+
+  const filteredKeys = new Set(CASCADE_ORDER.filter((k) => selects[k]?.value));
+  const options = QUICK_ANALYSIS_OPTIONS.filter((o) => !filteredKeys.has(o.key));
+
+  if (!options.length) {
+    qaEl.classList.add('hidden');
+    return;
+  }
+
+  ctxEl.textContent = activeFilters.join(' · ');
+  chipsEl.innerHTML = '';
+
+  for (const opt of options) {
+    const btn = document.createElement('button');
+    btn.className = 'qa-chip';
+    btn.type = 'button';
+    btn.textContent = opt.label;
+    btn.addEventListener('click', () => {
+      selects.groupBy.value = opt.key;
+      selects.metric.value = 'count';
+      runQuery({ prompt: `Análise por ${opt.label.replace('Por ', '').toLowerCase()} — ${activeFilters.join(', ')}` }).catch((err) => alert(err.message));
+    });
+    chipsEl.appendChild(btn);
+  }
+
+  qaEl.classList.remove('hidden');
+}
+
 for (const key of CASCADE_ORDER) {
-  selects[key].addEventListener('change', () => refreshDownstream(key));
+  selects[key].addEventListener('change', () => {
+    refreshDownstream(key);
+    updateQuickAnalysis();
+  });
 }
 
 document.getElementById('extract-button').addEventListener('click', async () => {

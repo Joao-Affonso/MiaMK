@@ -206,8 +206,8 @@ function createDatasetService({ workbookPath }) {
     totalRegistros: rows.length,
     topEstados: topValues(rows, 'estado', 8),
     topExibidores: topValues(rows, 'exibidor', 8),
-    topTiposMidia: topValues(rows, 'tipo_de_midia', 8),
-    topTipos: topValues(rows, 'tipo', 5),
+    topTiposMidia: topValues(rows, 'tipo_de_midia', 50),
+    topTipos: topValues(rows, 'tipo', 20),
   };
 
   function filterRows(filters = []) {
@@ -308,9 +308,18 @@ function createDatasetService({ workbookPath }) {
     };
   }
 
+  function normalizeFilterValue(filter) {
+    if (NUMERIC_COLUMNS.has(filter.column)) return filter;
+    const up = (v) => (typeof v === 'string' ? v.trim().toUpperCase() : v);
+    return {
+      ...filter,
+      value: Array.isArray(filter.value) ? filter.value.map(up) : up(filter.value),
+    };
+  }
+
   function query(options = {}) {
     const querySpec = {
-      filters: Array.isArray(options.filters) ? options.filters : [],
+      filters: Array.isArray(options.filters) ? options.filters.map(normalizeFilterValue) : [],
       groupBy: Array.isArray(options.groupBy) ? options.groupBy : [],
       metric: options.metric || 'count',
       metricColumn: options.metricColumn || 'fluxo_de_passantes',
@@ -449,7 +458,7 @@ function createDatasetService({ workbookPath }) {
       throw new Error('Coluna inválida para contagem distinta.');
     }
 
-    const filteredRows = filterRows(filters);
+    const filteredRows = filterRows(filters.map(normalizeFilterValue));
     const distinct = new Set(filteredRows.map((row) => row[column]));
     return {
       column,

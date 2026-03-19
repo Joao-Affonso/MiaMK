@@ -2,6 +2,16 @@ const OpenAI = require('openai');
 
 function createChatService({ datasetService }) {
   function ensureClient() {
+    if (process.env.GROQ_API_KEY) {
+      return {
+        client: new OpenAI({
+          apiKey: process.env.GROQ_API_KEY,
+          baseURL: 'https://api.groq.com/openai/v1',
+        }),
+        model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+      };
+    }
+
     if (process.env.GEMINI_API_KEY) {
       return {
         client: new OpenAI({
@@ -29,15 +39,21 @@ function createChatService({ datasetService }) {
       'CONCEITO FUNDAMENTAL: cada linha da base e um PONTO DE MIDIA (uma tela, outdoor ou painel fisico). Um EXIBIDOR e uma empresa que opera varios pontos. Nunca confunda pontos com exibidores.',
       'Ao responder, sempre use "pontos de midia" ou "ativos" para se referir a registros — nunca "exibidores" no lugar de contagem.',
       'SEMPRE chame uma ferramenta antes de responder. Nunca invente numeros.',
+      'AMBIGUIDADE: se a pergunta mencionar um termo geografico ambiguo (ex: "rio" pode ser estado RJ ou cidade Rio de Janeiro ou cidades como Rio Preto, Rio Verde), use request_clarification com opcoes especificas ANTES de consultar os dados. Faca o mesmo para outros termos que possam gerar confusao.',
       'Para perguntas como "quantas cidades", "quantos exibidores distintos", "em quantos estados": use count_distinct.',
       'Para rankings, distribuicoes ou valores agregados: use query_base com groupBy e limit adequado.',
       'IMPORTANTE: para perguntas como "quais exibidores atuam", "que tipos existem", "quem opera em X" — SEMPRE use groupBy para obter valores distintos. Nunca use select sem groupBy para esse tipo de pergunta.',
-      'Filtros sao case-insensitive: use o valor como o usuario digitou.',
+      'IMPORTANTE: os valores da base estao em MAIUSCULAS. Nos filtros, use SEMPRE maiusculas (ex: tipo_de_midia="DIGITAL", cidade="SAO PAULO", estado="SP"). Nunca use letras minusculas ou mistas em valores de filtro.',
       'Para rankings de exibidores em uma cidade: groupBy=["exibidor"], filters por cidade, limit 20.',
       'Interprete os dados: destaque o que e surpreendente, relevante ou estrategico. Responda em 3 a 5 frases naturais.',
       `Colunas: ${toolContext.columns.map((c) => c.key).join(', ')}. Base: ${toolContext.totalRows} pontos de midia.`,
       `Exibidores conhecidos (empresas operadoras): ${toolContext.quickStats.topExibidores.map((e) => e.value).join(', ')}, entre outros. Qualquer nome que apareca na conversa como exibidor deve ser filtrado com column="exibidor", nao com tipo_de_midia.`,
+      `Valores reais de tipo_de_midia na base: ${toolContext.quickStats.topTiposMidia.map((t) => t.value).join(', ')}. Use EXATAMENTE esses valores ao filtrar tipo_de_midia.`,
+      `Valores reais de tipo na base: ${toolContext.quickStats.topTipos.map((t) => t.value).join(', ')}. Use EXATAMENTE esses valores ao filtrar tipo.`,
+      `MAPEAMENTO DE TERMOS: quando o usuario pedir algo que nao bate exatamente com os valores acima, encontre o mais proximo. Exemplos: "banca digital" → tipo_de_midia contains "BANCA"; "outdoor" → tipo_de_midia="OUTDOOR"; "busdoor" → tipo_de_midia="BUSDOOR"; "digital" sozinho → tipo="DIGITAL". Se o usuario pedir um tipo especifico de midia, filtre tipo_de_midia, nao tipo.`,
       'IMPORTANTE: quando o usuario mencionar um nome que apareceu na resposta anterior (exibidor, cidade, tipo), interprete pelo contexto — nao trate nomes de empresas como tipos de midia.',
+      'NOMES PARCIAIS: se o usuario usar um nome incompleto ou informal (ex: "silva paineis", "clear", "eletromidia"), use o operador contains em vez de eq para buscar. Ex: usuario diz "silva paineis" → filtro {column:"exibidor", operator:"contains", value:"SILVA PAINEIS"}. Nunca exija o nome exato.',
+      'CONTEXTO GEOGRAFICO: se a conversa anterior tinha filtros ativos de cidade ou estado E o usuario faz uma pergunta de acompanhamento sobre um exibidor ou tipo sem especificar escopo, use request_clarification com duas opcoes: (1) dentro do filtro geografico anterior, (2) no Brasil inteiro. Exemplo: filtrou SAO JOSE DO RIO PRETO, usuario pergunta "esse silva paineis tem quais midias?" → pergunte: "Voce quer saber do Silva Paineis em Sao Jose do Rio Preto ou no Brasil inteiro?" com botoes para cada opcao. So pule a pergunta se o usuario ja especificou o escopo explicitamente.',
     ].join(' ');
 
     return [
@@ -63,6 +79,31 @@ function createChatService({ datasetService }) {
     const chatMessages = buildMessages(messages, toolContext);
 
     const tools = [
+      {
+        type: 'function',
+        function: {
+          name: 'request_clarification',
+          description: 'Use quando a pergunta do usuario for ambigua e precisar de mais contexto antes de consultar os dados. Por exemplo: "rio" pode ser estado RJ, cidade Rio de Janeiro, ou outras cidades com "rio" no nome. Forneca opcoes claras e especificas para o usuario escolher.',
+          parameters: {
+            type: 'object',
+            properties: {
+              question: { type: 'string', description: 'Pergunta de esclarecimento para o usuario. Seja breve.' },
+              options: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    label: { type: 'string', description: 'Texto do botao (ex: "Rio de Janeiro — estado (RJ)")' },
+                    context: { type: 'string', description: 'Como interpretar essa opcao na proxima consulta (ex: "filtrar estado = RJ")' },
+                  },
+                  required: ['label'],
+                },
+              },
+            },
+            required: ['question', 'options'],
+          },
+        },
+      },
       {
         type: 'function',
         function: {
@@ -116,22 +157,20 @@ function createChatService({ datasetService }) {
                 },
               },
               groupBy: {
-                type: 'array',
-                items: { type: 'string' },
+                oneOf: [{ type: 'array', items: { type: 'string' } }, { type: 'null' }],
               },
               metric: {
                 type: 'string',
                 enum: ['count', 'sum', 'avg', 'min', 'max'],
               },
               metricColumn: {
-                type: 'string',
+                oneOf: [{ type: 'string' }, { type: 'null' }],
               },
               limit: {
-                type: 'number',
+                oneOf: [{ type: 'number' }, { type: 'null' }],
               },
               select: {
-                type: 'array',
-                items: { type: 'string' },
+                oneOf: [{ type: 'array', items: { type: 'string' } }, { type: 'null' }],
               },
             },
           },
@@ -139,10 +178,11 @@ function createChatService({ datasetService }) {
       },
     ];
 
-    const isOllama = !process.env.GEMINI_API_KEY;
+    const isOllama = !process.env.GEMINI_API_KEY && !process.env.GROQ_API_KEY;
 
     let lastQueryResult = null;
     let lastDistinctResult = null;
+    let clarification = null;
     let response = await client.chat.completions.create({
       model,
       temperature: 0.1,
@@ -163,7 +203,14 @@ function createChatService({ datasetService }) {
         console.log('[tool call]', toolCall.function.name, JSON.stringify(args));
         let result;
 
-        if (toolCall.function.name === 'query_base') {
+        if (toolCall.function.name === 'request_clarification') {
+          clarification = args;
+          result = { status: 'aguardando_escolha_do_usuario' };
+        } else if (toolCall.function.name === 'query_base') {
+          if (args.groupBy === null) args.groupBy = [];
+          if (args.select === null) args.select = [];
+          if (args.metricColumn === null) delete args.metricColumn;
+          if (args.limit === null) delete args.limit;
           result = datasetService.query(args);
           lastQueryResult = result;
         } else if (toolCall.function.name === 'count_distinct') {
@@ -221,6 +268,10 @@ function createChatService({ datasetService }) {
           let result;
 
           if (toolCall.function.name === 'query_base') {
+            if (args.groupBy === null) args.groupBy = [];
+            if (args.select === null) args.select = [];
+            if (args.metricColumn === null) delete args.metricColumn;
+            if (args.limit === null) delete args.limit;
             result = datasetService.query(args);
             lastQueryResult = result;
           } else if (toolCall.function.name === 'count_distinct') {
@@ -254,6 +305,7 @@ function createChatService({ datasetService }) {
       model,
       result: lastQueryResult ? lastQueryResult.presentation : null,
       lastQuery: lastQueryResult ? lastQueryResult.query : null,
+      clarification: clarification || null,
     };
   }
 
